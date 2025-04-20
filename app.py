@@ -1,126 +1,89 @@
 import streamlit as st
 import pandas as pd
+from PIL import Image
 import subprocess
 import os
 import base64
 import pickle
-import shutil
-import uuid
 
 
-# ---------- PaDEL Descriptor Calculation ----------
-def desc_calc(smi_file_path, output_csv_path):
-    # Run descriptor calculation ONLY for the uploaded file
-    bash_cmd = f"java -Xms2G -Xmx2G -Djava.awt.headless=true -jar PaDEL-Descriptor/PaDEL-Descriptor.jar " \
-               f"-removesalt -standardizenitro -fingerprints " \
-               f"-descriptortypes PaDEL-Descriptor/PubchemFingerprinter.xml " \
-               f"-dir {os.path.dirname(smi_file_path)} " \
-               f"-file {output_csv_path}"
-
-    process = subprocess.Popen(bash_cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def desc_calc():
+    bashCommand = "java -Xms2G -Xmx2G -Djava.awt.headless=true -jar ./PaDEL-Descriptor/PaDEL-Descriptor.jar -removesalt -standardizenitro -fingerprints -descriptortypes ./PaDEL-Descriptor/PubchemFingerprinter.xml -dir ./ -file descriptors_output.csv"
+    process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
     output, error = process.communicate()
-
-    if process.returncode != 0:
-        st.error("Descriptor calculation failed!")
-        st.text(error.decode())
-        return False
-    return True
+    os.remove('alzheimers_molecule.smi')
 
 
-# ---------- Downloadable Link ----------
 def filedownload(df):
     csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    return f'<a href="data:file/csv;base64,{b64}" download="prediction.csv">Download prediction CSV</a>'
+    b64 = base64.b64encode(csv.encode()).decode()  
+    href = f'<a href="data:file/csv;base64,{b64}" download="prediction.csv">Download Predictions</a>'
+    return href
 
 
-# ---------- Run Model ----------
-def predict_bioactivity(desc_subset, original_ids):
-    model = pickle.load(open('bioactivity_prediction_model.pkl', 'rb'))
-    predictions = model.predict(desc_subset)
-    results = pd.DataFrame({
-        'Compound_ID': original_ids,
-        'pIC50': predictions
-    }).sort_values(by='pIC50', ascending=False)
-    return results
+def build_model(input_data):
+  
+    load_model = pickle.load(open('bioactivity_prediction_model.pkl', 'rb'))
+    
+    prediction = load_model.predict(input_data)
+    st.header('**Prediction output**')
+    prediction_output = pd.Series(prediction, name='pIC50')
+    chembl_id = pd.Series(load_data.iloc[:, 1], name='chembl_id') 
+    df = pd.concat([chembl_id, prediction_output], axis=1)
+    
+    df_sorted = df.sort_values(by='pIC50', ascending=False)
+    st.write(df_sorted)
+    st.markdown(filedownload(df_sorted), unsafe_allow_html=True)
+    
 
 
-# ---------- Streamlit App ----------
-st.title("🧪 QSAR-based Compound Activity Prediction")
+st.markdown("""
+# Compounds Bioactivity Prediction
+""")
 
-with st.sidebar.header("1. Upload your compound file"):
-    uploaded_file = st.sidebar.file_uploader("Upload SMILES file (.smi / .csv / .txt)", type=['smi', 'csv', 'txt'])
 
-if st.sidebar.button("🔬 Run Prediction"):
+with st.sidebar.header('1. Upload your CSV or SMI data'):
+    uploaded_file = st.sidebar.file_uploader("Upload your input file", type=['txt', 'csv', 'smi'])
+    st.sidebar.markdown("""
+
+""")
+
+if st.sidebar.button('Predict'):
     if uploaded_file is not None:
-        # Create unique temp folder
-        temp_dir = f"temp_{uuid.uuid4().hex[:8]}"
-        os.makedirs(temp_dir, exist_ok=True)
-
-        # Read uploaded file
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                data = pd.read_csv(uploaded_file)
-            else:
-                data = pd.read_table(uploaded_file, sep=None, engine='python', header=None)
-        except Exception as e:
-            st.error(f"Failed to read uploaded file: {e}")
-            shutil.rmtree(temp_dir)
+       
+        if uploaded_file.name.endswith('.csv'):
+            load_data = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith('.smi') or uploaded_file.name.endswith('.txt'):
+            load_data = pd.read_table(uploaded_file, sep=' ', header=None)
+        else:
+            st.error("Unsupported file format. Please upload a CSV, SMI, or TXT file.")
             st.stop()
 
-        if data.shape[1] != 2:
-            st.error("File must contain exactly 2 columns: [SMILES, Compound_ID]")
-            shutil.rmtree(temp_dir)
-            st.stop()
+       
+        load_data.to_csv('alzheimers_molecule.smi', sep='\t', header=False, index=False)
 
-        st.subheader("📄 Uploaded Data")
-        st.write(data)
+        st.header('**Original input data**')
+        st.write(load_data)
 
-        # Save to SMILES file
-        smiles_path = os.path.join(temp_dir, "input.smi")
-        data.to_csv(smiles_path, sep="\t", header=False, index=False)
+        with st.spinner("Calculating descriptors..."):
+            desc_calc()
 
-        st.info("Calculating descriptors, please wait...")
-        descriptor_path = os.path.join(temp_dir, "descriptors_output.csv")
-        success = desc_calc(smiles_path, descriptor_path)
+        
+        st.header('**Calculated molecular descriptors**')
+        desc = pd.read_csv('descriptors_output.csv')
+        st.write(desc)
+        st.write(desc.shape)
 
-        if not success:
-            shutil.rmtree(temp_dir)
-            st.stop()
+      
+        st.header('**Subset of descriptors from previously built models**')
+        Xlist = list(pd.read_csv('descriptor_list.csv').columns)
+        desc_subset = desc[Xlist]
+        st.write(desc_subset)
+        st.write(desc_subset.shape)
 
-        # Read descriptors
-        try:
-            descriptors = pd.read_csv(descriptor_path)
-        except:
-            st.error("Failed to read descriptor file.")
-            shutil.rmtree(temp_dir)
-            st.stop()
-
-        st.subheader("📊 All Molecular Descriptors")
-        st.write(descriptors.head())
-
-        # Select important descriptors
-        try:
-            top_descriptors = pd.read_csv("descriptor_list.csv").columns.tolist()
-            desc_subset = descriptors[top_descriptors]
-        except:
-            st.error("Check that descriptor_list.csv exists and matches the model features.")
-            shutil.rmtree(temp_dir)
-            st.stop()
-
-        st.subheader("📌 Selected Top Descriptors (used in model)")
-        st.write(desc_subset.head())
-
-        # Predict
-        results = predict_bioactivity(desc_subset, data.iloc[:, 1])
-        st.subheader("🔮 Prediction Results")
-        st.write(results)
-
-        st.markdown(filedownload(results), unsafe_allow_html=True)
-
-        # Clean temp
-        shutil.rmtree(temp_dir)
+        
+        build_model(desc_subset)
     else:
-        st.warning("Please upload a file first.")
+        st.error("Please upload a file to proceed.")
 else:
-    st.info("Upload a file and click 'Run Prediction' to begin.")
+    st.info('Upload input data in the sidebar to start!')
